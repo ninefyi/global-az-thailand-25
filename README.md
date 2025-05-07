@@ -15,7 +15,12 @@ AZURE_OPENAI_ENDPOINT=your_api_key_endpoint
 AZURE_OPENAI_DEPLOYMENT=your_deployment_name
 AZURE_OPENAI_API_VERSION=your_api_version
 ```
-7. Start Azure MCP Server with SSE
+7. `pip install -r requirements.txt`
+8. Start Azure MCP Server with SSE
 ```bash
 npx -y @azure/mcp@latest server start --transport sse
+```
+9. Start MCP Client with SSE
+```bash
+python mcp_sse_client.py
 ```
