@@ -4,3 +4,7 @@
 - Event type: Online
 ----
 ## Instruction
+1. `sudo apt-get update && sudo apt-get install -y azure-cli`
+3. `az login`
+4. Click URL link and copy code
+5. Pasted code to the URL link.
