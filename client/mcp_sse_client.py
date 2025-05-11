@@ -34,7 +34,7 @@ class MCPClientWrapper:
         self.tools = []
     
     def connect(self, server_path: str) -> str:
-        return loop.run_until_complete(self._connect("http://localhost:5008/sse"))
+        return loop.run_until_complete(self._connect(server_path))
 
 
     async def _connect(self, server_path: str) -> str:
@@ -53,10 +53,20 @@ class MCPClientWrapper:
             "function": {
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": tool.inputSchema
+                "parameters": tool.inputSchema if tool.inputSchema else {}
             }
         } for tool in response.tools]
-        
+
+        # Validate tool schemas
+        for tool in self.tools:
+            parameters = tool["function"]["parameters"]
+            if not isinstance(parameters, dict) or "type" not in parameters or parameters["type"] != "object":
+                tool["function"]["parameters"] = {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+
         tool_names = [tool["function"]["name"] for tool in self.tools]
         return f"Connected to MCP server. Available tools: {', '.join(tool_names)}"
     
@@ -230,7 +240,7 @@ def gradio_interface():
                 server_path = gr.Textbox(
                     label="Server-Sent Events (SSE) URL",
                     placeholder="Enter path to sse url",
-                    value="domain.com/sse"
+                    value="http://localhost:5008/sse"
                 )
             with gr.Column(scale=1):
                 connect_btn = gr.Button("Connect")
