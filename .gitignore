@@ -1,2 +1,4 @@
 .env
 .gradio
+__pycache__
+.chainlit
