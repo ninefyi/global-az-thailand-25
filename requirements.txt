@@ -1,3 +1,4 @@
 gradio
 mcp
-openai
+mcp_use
+langchain_openai
