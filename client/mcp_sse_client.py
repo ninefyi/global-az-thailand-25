@@ -1,236 +1,104 @@
 import asyncio
 import os
 import json
-from typing import List, Dict, Any, Union
-from contextlib import AsyncExitStack
-
+from typing import List
+from dotenv import load_dotenv
 import gradio as gr
-from gradio.components.chatbot import ChatMessage
+from langchain_openai import AzureChatOpenAI
+from mcp_use import MCPAgent, MCPClient
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-from openai import AzureOpenAI
-from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
+# Initialize event loop
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-class MCPClientWrapper:
-    def __init__(self):
-        self.session = None
-        self.exit_stack = None
-        
-        # Replace Anthropic with Azure OpenAI client
-        self.client = AzureOpenAI(
+# Global agent and client variables
+mcp_client = None
+agent = None
+
+async def initialize_agent(server_url):
+    """Initialize the MCP client and agent."""
+    global mcp_client, agent
+    
+    config = {
+        "mcpServers": {
+            "http": {
+                "url": server_url
+            }
+        }
+    }
+    
+    try:
+        # Initialize the MCP client and LLM
+        mcp_client = MCPClient.from_dict(config)
+        llm = AzureChatOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
             api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT")
+            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+            model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            temperature=0.7
         )
-        
-        # Azure OpenAI deployment name
-        self.deployment_name = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-        
-        self.tools = []
-    
-    def connect(self, server_path: str) -> str:
-        return loop.run_until_complete(self._connect(server_path))
+        agent = MCPAgent(llm=llm, client=mcp_client, max_steps=30, verbose=True)
 
-
-    async def _connect(self, server_path: str) -> str:
-        if self.exit_stack:
-            await self.exit_stack.aclose()
+        print(f"Connecting to MCP server at {server_url}...")
         
-        self.exit_stack = AsyncExitStack()
+        # Extract the base URL from the SSE endpoint
+        base_url = server_url.rsplit('/', 1)[0] if '/sse' in server_url else server_url
+        sse_endpoint = server_url if '/sse' in server_url else f"{server_url.rstrip('/')}/sse"
         
-        sse_transport = await self.exit_stack.enter_async_context(sse_client(server_path))
-        self.read, self.write = sse_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(self.read, self.write))
-        
-        response = await self.session.list_tools()
-        self.tools = [{ 
-            "type": "function",
-            "function": {
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.inputSchema if tool.inputSchema else {}
-            }
-        } for tool in response.tools]
-
-        # Validate tool schemas
-        for tool in self.tools:
-            parameters = tool["function"]["parameters"]
-            if not isinstance(parameters, dict) or "type" not in parameters or parameters["type"] != "object":
-                tool["function"]["parameters"] = {
-                    "type": "object",
-                    "properties": {},
-                    "required": []
-                }
-
-        tool_names = [tool["function"]["name"] for tool in self.tools]
-        return f"Connected to MCP server. Available tools: {', '.join(tool_names)}"
-    
-    def process_message(self, message: str, history: List[Union[Dict[str, Any], ChatMessage]]) -> tuple:
-        if not self.session:
-            return history + [
-                {"role": "user", "content": message}, 
-                {"role": "assistant", "content": "Please connect to an MCP server first."}
-            ], gr.Textbox(value="")
-        
-        new_messages = loop.run_until_complete(self._process_query(message, history))
-        return history + [{"role": "user", "content": message}] + new_messages, gr.Textbox(value="")
-    
-    async def _process_query(self, message: str, history: List[Union[Dict[str, Any], ChatMessage]]):
-        openai_messages = []
-        for msg in history:
-            if isinstance(msg, ChatMessage):
-                role, content = msg.role, msg.content
-            else:
-                role, content = msg.get("role"), msg.get("content")
+        try:
+            async with sse_client(sse_endpoint) as streams:
+                async with ClientSession(*streams) as session:
+                    # Initialize session
+                    await session.initialize()
+                    
+                    # List available tools to verify connection
+                    print("Initialized SSE client...")
+                    print("Listing tools...")
+                    response = await session.list_tools()
+                    tools = response.tools
+                    tool_names = [tool.name for tool in tools]
+                    print(f"Connected to MCP server. Available tools:", tool_names)
+                    
+                    # Return success message with available tools
+                    return "Connected to MCP server. Available tools:", tool_names
+        except Exception as inner_e:
+            raise ConnectionError(f"Failed to establish session with MCP server: {str(inner_e)}")
             
-            if role in ["user", "assistant", "system"]:
-                openai_messages.append({"role": role, "content": content})
-        
-        openai_messages.append({"role": "user", "content": message})
-        
-        # Convert to Azure OpenAI call
-        response = self.client.chat.completions.create(
-            model=self.deployment_name,
-            messages=openai_messages,
-            tools=self.tools,
-            tool_choice="auto",
-            max_tokens=1000
-        )
+    except Exception as e:
+        import traceback
+        print(f"Detailed error: {traceback.format_exc()}")
+        return f"Error connecting to MCP server: {str(e)}"
 
-        result_messages = []
-        
-        # Handle assistant response
-        assistant_message = response.choices[0].message
-        
-        if not assistant_message.tool_calls:
-            # Simple text response
-            result_messages.append({
-                "role": "assistant", 
-                "content": assistant_message.content
-            })
-        else:
-            # Tool calls processing
-            for tool_call in assistant_message.tool_calls:
-                tool_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-                
-                result_messages.append({
-                    "role": "assistant",
-                    "content": f"I'll use the {tool_name} tool to help answer your question.",
-                    "metadata": {
-                        "title": f"Using tool: {tool_name}",
-                        "log": f"Parameters: {json.dumps(tool_args, ensure_ascii=True)}",
-                        "status": "pending",
-                        "id": f"tool_call_{tool_name}"
-                    }
-                })
-                
-                result_messages.append({
-                    "role": "assistant",
-                    "content": "```json\n" + json.dumps(tool_args, indent=2, ensure_ascii=True) + "\n```",
-                    "metadata": {
-                        "parent_id": f"tool_call_{tool_name}",
-                        "id": f"params_{tool_name}",
-                        "title": "Tool Parameters"
-                    }
-                })
-                
-                result = await self.session.call_tool(tool_name, tool_args)
-                
-                if result_messages and "metadata" in result_messages[-2]:
-                    result_messages[-2]["metadata"]["status"] = "done"
-                
-                result_messages.append({
-                    "role": "assistant",
-                    "content": "Here are the results from the tool:",
-                    "metadata": {
-                        "title": f"Tool Result for {tool_name}",
-                        "status": "done",
-                        "id": f"result_{tool_name}"
-                    }
-                })
-                
-                result_content = result.content
-                if isinstance(result_content, list):
-                    result_content = "\n".join(str(item) for item in result_content)
-                
-                try:
-                    result_json = json.loads(result_content)
-                    if isinstance(result_json, dict) and "type" in result_json:
-                        if result_json["type"] == "image" and "url" in result_json:
-                            result_messages.append({
-                                "role": "assistant",
-                                "content": {"path": result_json["url"], "alt_text": result_json.get("message", "Generated image")},
-                                "metadata": {
-                                    "parent_id": f"result_{tool_name}",
-                                    "id": f"image_{tool_name}",
-                                    "title": "Generated Image"
-                                }
-                            })
-                        else:
-                            result_messages.append({
-                                "role": "assistant",
-                                "content": "```\n" + result_content + "\n```",
-                                "metadata": {
-                                    "parent_id": f"result_{tool_name}",
-                                    "id": f"raw_result_{tool_name}",
-                                    "title": "Raw Output"
-                                }
-                            })
-                except:
-                    result_messages.append({
-                        "role": "assistant",
-                        "content": "```\n" + result_content + "\n```",
-                        "metadata": {
-                            "parent_id": f"result_{tool_name}",
-                            "id": f"raw_result_{tool_name}",
-                            "title": "Raw Output"
-                        }
-                    })
-                
-                # Add tool response to history and get assistant's follow-up
-                openai_messages.append({
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [{
-                        "id": tool_call.id,
-                        "type": "function",
-                        "function": {
-                            "name": tool_name,
-                            "arguments": json.dumps(tool_args)
-                        }
-                    }]
-                })
-                
-                openai_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "content": result_content
-                })
-                
-                # Get the assistant's response after tool call
-                next_response = self.client.chat.completions.create(
-                    model=self.deployment_name,
-                    messages=openai_messages,
-                    max_tokens=1000
-                )
-                
-                if next_response.choices[0].message.content:
-                    result_messages.append({
-                        "role": "assistant",
-                        "content": next_response.choices[0].message.content
-                    })
+def connect(server_url):
+    """Connect to the MCP server and initialize the agent."""
+    return asyncio.run(initialize_agent(server_url))
 
-        return result_messages
+async def process_message_async(message, history):
+    """Process a user message using the MCP agent."""
+    global agent
+    
+    if not agent:
+        return history + [(message, "Please connect to an MCP server first.")], ""
+    
+    try:
+        # Run the query through the agent
+        result = await agent.run(message, max_steps=30)
+        return history + [(message, result)], ""
+    except Exception as e:
+        return history + [(message, f"Error: {str(e)}")], ""
 
-client = MCPClientWrapper()
+def process_message(message, history):
+    """Synchronous wrapper for process_message_async."""
+    result, empty_text = asyncio.run(process_message_async(message, history))
+    return result, empty_text
 
 def gradio_interface():
+    """Create a Gradio interface for the MCP agent."""
     with gr.Blocks(title="MCP Azure Client") as demo:
         gr.Markdown("# MCP Azure Assistant")
         gr.Markdown("Connect to your MCP Azure server and chat with the assistant")
@@ -249,10 +117,8 @@ def gradio_interface():
         
         chatbot = gr.Chatbot(
             value=[], 
-            height=500,
-            type="messages",
-            show_copy_button=True,
-            avatar_images=("👤", "🤖")
+            height=200,
+            show_copy_button=True
         )
         
         with gr.Row(equal_height=True):
@@ -263,19 +129,29 @@ def gradio_interface():
             )
             clear_btn = gr.Button("Clear Chat", scale=1)
         
-        connect_btn.click(client.connect, inputs=server_path, outputs=status)
-        msg.submit(client.process_message, [msg, chatbot], [chatbot, msg])
+        # Set up event handlers
+        connect_btn.click(connect, inputs=server_path, outputs=status)
+        msg.submit(process_message, inputs=[msg, chatbot], outputs=[chatbot, msg])
         clear_btn.click(lambda: [], None, chatbot)
+        
+        # Add example prompts
+        gr.Examples(
+            examples=[
+                "List my Azure subscriptions",
+                "Show my virtual machines",
+                "Tell me about my resource groups",
+            ],
+            inputs=msg
+        )
         
     return demo
 
 if __name__ == "__main__":
-    if not os.getenv("AZURE_OPENAI_API_KEY"):
-        print("Warning: AZURE_OPENAI_API_KEY not found in environment. Please set it in your .env file.")
-    if not os.getenv("AZURE_OPENAI_ENDPOINT"):
-        print("Warning: AZURE_OPENAI_ENDPOINT not found in environment. Please set it in your .env file.")
-    if not os.getenv("AZURE_OPENAI_DEPLOYMENT"):
-        print("Warning: AZURE_OPENAI_DEPLOYMENT not found in environment. Please set it in your .env file.")
+    # Environment variable checks
+    required_vars = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT"]
+    for var in required_vars:
+        if not os.getenv(var):
+            print(f"Warning: {var} not found in environment. Please set it in your .env file.")
     
     interface = gradio_interface()
     interface.launch(debug=True, share=True)
