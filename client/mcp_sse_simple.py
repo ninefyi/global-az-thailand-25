@@ -2,7 +2,9 @@ import asyncio
 import os
 from dotenv import load_dotenv
 from langchain_openai import AzureChatOpenAI
-from mcp_use import MCPAgent, MCPClient
+from mcp_use import set_debug, MCPClient, MCPAgent
+
+set_debug(2)
 
 async def main():
     """Run the example using a configuration file."""
@@ -28,7 +30,7 @@ async def main():
 
     # Run the query
     result = await agent.run(
-        "List my Azure subscriptions",
+        "List all Azure subscriptions",
         max_steps=30,
     )
     print(f"\nResult: {result}")

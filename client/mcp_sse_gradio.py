@@ -1,13 +1,13 @@
 import asyncio
 import os
-import json
-from typing import List
 from dotenv import load_dotenv
 import gradio as gr
 from langchain_openai import AzureChatOpenAI
-from mcp_use import MCPAgent, MCPClient
+from mcp_use import MCPAgent, MCPClient, set_debug
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+
+set_debug(2)
 
 # Load environment variables
 load_dotenv()
@@ -148,7 +148,7 @@ def gradio_interface():
 
 if __name__ == "__main__":
     # Environment variable checks
-    required_vars = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT"]
+    required_vars = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_VERSION", "AZURE_OPENAI_DEPLOYMENT", "OPENAI_API_VERSION"]
     for var in required_vars:
         if not os.getenv(var):
             print(f"Warning: {var} not found in environment. Please set it in your .env file.")
